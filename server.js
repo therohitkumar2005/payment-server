@@ -1,13 +1,30 @@
-// server.js (with final debugging logs)
+// server.js (with Webhook for Balance Update)
 
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const crypto = require('crypto');
 require('dotenv').config();
 
+// Firebase Admin SDK ko initialize karna
+const admin = require('firebase-admin');
+// Environment variable se Firebase credentials lena
+const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
+const db = admin.firestore();
 const app = express();
+
+// IMPORTANT: Webhook ke liye raw body zaroori hai
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    }
+}));
 app.use(cors());
-app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
@@ -21,70 +38,97 @@ app.get('/', (req, res) => {
     res.status(200).send('Server is alive and running!');
 });
 
-// Create Order Endpoint with more detailed logs
+// Create Order Endpoint
 app.post('/create-order', async (req, res) => {
-    console.log("'/create-order' endpoint hit.");
-
     try {
         const { amount, userId, name, email, phone } = req.body;
-
-        if (!CLIENT_ID || !CLIENT_SECRET) {
-            console.error("FATAL: API Keys are not loaded from environment variables.");
-            return res.status(500).json({ error: 'Server configuration error. API keys missing.' });
-        }
-
         const orderId = `TFZ-${userId}-${Date.now()}`;
 
         const requestData = {
-            customer_details: {
-                customer_id: userId,
-                customer_email: email,
-                customer_phone: phone,
-                customer_name: name,
-            },
-            order_meta: {
-                return_url: `https://thefinalzoneg.web.app/addmoney.html?order_id={order_id}`,
-            },
+            customer_details: { customer_id: userId, customer_email: email, customer_phone: phone, customer_name: name },
+            order_meta: { return_url: `https://thefinalzoneg.web.app/addmoney.html?order_id={order_id}` },
             order_id: orderId,
             order_amount: amount,
             order_currency: "INR",
         };
+        const headers = { 'Content-Type': 'application/json', 'x-api-version': '2022-09-01', 'x-client-id': CLIENT_ID, 'x-client-secret': CLIENT_SECRET };
 
-        const headers = {
-            'Content-Type': 'application/json',
-            'x-api-version': '2022-09-01',
-            'x-client-id': CLIENT_ID,
-            'x-client-secret': CLIENT_SECRET,
-        };
-
-        console.log("Calling Cashfree API...");
         const response = await axios.post(CASHFREE_API_URL, requestData, { headers });
-
-        // ** YEH SABSE ZAROORI LOG HAI **
-        // Cashfree se mile poore response ko print karna
-        console.log("Full response from Cashfree:", JSON.stringify(response.data, null, 2));
-
-        // Check karna ki response mein payment_session_id hai ya nahi
-        if (response.data && response.data.payment_session_id) {
-            console.log("Successfully got session ID. Sending response to frontend.");
-            res.status(200).json(response.data);
-        } else {
-            console.error("Cashfree response OK, but payment_session_id is MISSING!");
-            console.error("This could be due to incorrect API keys or other account issues on Cashfree's side.");
-            res.status(500).json({ error: 'Failed to get session ID from payment gateway.' });
-        }
+        res.status(200).json(response.data);
 
     } catch (error) {
-        console.error('!!!!!! CASHFREE API ERROR !!!!!!');
-        if (error.response) {
-            console.error('Error Data:', error.response.data);
-            console.error('Error Status:', error.response.status);
-        } else {
-            console.error('Error Message:', error.message);
-        }
+        console.error('Create Order Error:', error.response ? error.response.data : error.message);
         res.status(500).json({ error: 'Failed to create payment order.' });
     }
 });
+
+
+// =================================================================
+// STEP 1: Webhook Endpoint - Cashfree yahan signal bhejega
+// =================================================================
+app.post('/webhook', async (req, res) => {
+    try {
+        const signature = req.headers['x-webhook-signature'];
+        const timestamp = req.headers['x-webhook-timestamp'];
+        const payload = req.rawBody;
+
+        // Step 1: Signature verify karna (bahut zaroori)
+        const secret = CLIENT_SECRET;
+        const dataToVerify = timestamp + payload;
+        const expectedSignature = crypto.createHmac('sha256', secret).update(dataToVerify).digest('base64');
+
+        if (signature !== expectedSignature) {
+            console.warn("Webhook signature verification failed!");
+            return res.status(400).send('Invalid signature');
+        }
+
+        // Step 2: Payment successful hai ya nahi, yeh check karna
+        const webhookData = JSON.parse(payload);
+        if (webhookData.data.order.order_status === 'PAID') {
+            console.log('Payment Successful Webhook Received:', webhookData.data.order.order_id);
+
+            const order = webhookData.data.order;
+            const userId = order.customer_details.customer_id;
+            const amountPaid = order.order_amount;
+
+            // Step 3: Firestore Database mein balance update karna
+            const userRef = db.collection('users').doc(userId);
+            const transactionRef = db.collection('addMoneyRequests').doc(); // Naya document
+
+            // Transaction ka istemal karke atomically update karna
+            await db.runTransaction(async (t) => {
+                const userDoc = await t.get(userRef);
+                if (!userDoc.exists) {
+                    throw "User not found!";
+                }
+                const currentBalance = userDoc.data().depositBalance || 0;
+                const newBalance = currentBalance + amountPaid;
+                
+                // User ka balance update karna
+                t.update(userRef, { depositBalance: newBalance });
+                
+                // Transaction record banana
+                t.set(transactionRef, {
+                    userId: userId,
+                    amount: amountPaid,
+                    orderId: order.order_id,
+                    transactionId: webhookData.data.payment.cf_payment_id,
+                    status: 'SUCCESS',
+                    createdAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+            });
+
+            console.log(`Successfully updated balance for user ${userId}. New balance: ${newBalance}`);
+        }
+
+        res.status(200).send('Webhook processed');
+
+    } catch (error) {
+        console.error('Error processing webhook:', error);
+        res.status(500).send('Error processing webhook');
+    }
+});
+
 
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
