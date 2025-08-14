@@ -1,4 +1,4 @@
-// server.js (with added debugging logs)
+// server.js (with final debugging logs)
 
 const express = require('express');
 const axios = require('axios');
@@ -16,30 +16,18 @@ const CASHFREE_API_URL = 'https://api.cashfree.com/pg/orders';
 const CLIENT_ID = process.env.CASHFREE_CLIENT_ID;
 const CLIENT_SECRET = process.env.CASHFREE_CLIENT_SECRET;
 
-// =================================================================
-// STEP 1: Health Check - Check if the server is alive
-// =================================================================
+// Health Check endpoint
 app.get('/', (req, res) => {
-    console.log("Health check endpoint was hit!");
     res.status(200).send('Server is alive and running!');
 });
 
-
-// =================================================================
-// STEP 2: Create Order Endpoint with more logs
-// =================================================================
+// Create Order Endpoint with more detailed logs
 app.post('/create-order', async (req, res) => {
-    // Jasoosi Log 1: Check if the request reached here
-    console.log("'/create-order' endpoint hit. Request body:", req.body);
-
-    // Jasoosi Log 2: Check if API keys are loaded (only first 5 chars for security)
-    console.log("CLIENT_ID loaded:", CLIENT_ID ? CLIENT_ID.substring(0, 5) + '...' : 'NOT LOADED');
-    console.log("CLIENT_SECRET loaded:", CLIENT_SECRET ? CLIENT_SECRET.substring(0, 5) + '...' : 'NOT LOADED');
+    console.log("'/create-order' endpoint hit.");
 
     try {
         const { amount, userId, name, email, phone } = req.body;
 
-        // Check if essential data is missing
         if (!CLIENT_ID || !CLIENT_SECRET) {
             console.error("FATAL: API Keys are not loaded from environment variables.");
             return res.status(500).json({ error: 'Server configuration error. API keys missing.' });
@@ -55,7 +43,6 @@ app.post('/create-order', async (req, res) => {
                 customer_name: name,
             },
             order_meta: {
-                // IMPORTANT: Change this to your actual return URL
                 return_url: `https://thefinalzoneg.web.app/addmoney.html?order_id={order_id}`,
             },
             order_id: orderId,
@@ -70,31 +57,31 @@ app.post('/create-order', async (req, res) => {
             'x-client-secret': CLIENT_SECRET,
         };
 
-        // Jasoosi Log 3: Log before calling Cashfree
-        console.log("Calling Cashfree API with orderId:", orderId);
+        console.log("Calling Cashfree API...");
         const response = await axios.post(CASHFREE_API_URL, requestData, { headers });
 
-        // Jasoosi Log 4: Log on successful response from Cashfree
-        console.log("Successfully created order with Cashfree. Sending response to frontend.");
-        res.status(200).json(response.data);
+        // ** YEH SABSE ZAROORI LOG HAI **
+        // Cashfree se mile poore response ko print karna
+        console.log("Full response from Cashfree:", JSON.stringify(response.data, null, 2));
+
+        // Check karna ki response mein payment_session_id hai ya nahi
+        if (response.data && response.data.payment_session_id) {
+            console.log("Successfully got session ID. Sending response to frontend.");
+            res.status(200).json(response.data);
+        } else {
+            console.error("Cashfree response OK, but payment_session_id is MISSING!");
+            console.error("This could be due to incorrect API keys or other account issues on Cashfree's side.");
+            res.status(500).json({ error: 'Failed to get session ID from payment gateway.' });
+        }
 
     } catch (error) {
-        // This is the most important log for errors
         console.error('!!!!!! CASHFREE API ERROR !!!!!!');
         if (error.response) {
-            // The request was made and the server responded with a status code
-            // that falls out of the range of 2xx
             console.error('Error Data:', error.response.data);
             console.error('Error Status:', error.response.status);
-            console.error('Error Headers:', error.response.headers);
-        } else if (error.request) {
-            // The request was made but no response was received
-            console.error('Error Request:', error.request);
         } else {
-            // Something happened in setting up the request that triggered an Error
             console.error('Error Message:', error.message);
         }
-        console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
         res.status(500).json({ error: 'Failed to create payment order.' });
     }
 });
