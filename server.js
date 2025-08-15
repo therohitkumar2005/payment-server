@@ -1,4 +1,4 @@
-// server.js (with Webhook for Balance Update)
+// server.js (with Webhook for Balance Update and Debugging)
 
 const express = require('express');
 const axios = require('axios');
@@ -25,6 +25,22 @@ app.use(express.json({
     }
 }));
 app.use(cors());
+
+
+// =================================================================
+// >> DEBUGGING MIDDLEWARE <<
+// Har request aur uske headers ko log karne ke liye
+// =================================================================
+app.use((req, res, next) => {
+    console.log(`--> Request Received: ${req.method} ${req.originalUrl}`);
+    if (req.originalUrl === '/webhook') {
+        // Sirf webhook ke liye headers ko detail mein log karein
+        console.log('--> Webhook Headers:', JSON.stringify(req.headers, null, 2));
+    }
+    next(); // Request ko aage bhejo
+});
+// =================================================================
+
 
 const PORT = process.env.PORT || 3000;
 
@@ -64,7 +80,7 @@ app.post('/create-order', async (req, res) => {
 
 
 // =================================================================
-// STEP 1: Webhook Endpoint - Cashfree yahan signal bhejega
+// Webhook Endpoint - Cashfree yahan signal bhejega
 // =================================================================
 app.post('/webhook', async (req, res) => {
     try {
@@ -90,6 +106,7 @@ app.post('/webhook', async (req, res) => {
             const order = webhookData.data.order;
             const userId = order.customer_details.customer_id;
             const amountPaid = order.order_amount;
+            let finalBalance = 0; // <<-- BUG FIX: Variable ko yahan bahar define kiya
 
             // Step 3: Firestore Database mein balance update karna
             const userRef = db.collection('users').doc(userId);
@@ -99,10 +116,11 @@ app.post('/webhook', async (req, res) => {
             await db.runTransaction(async (t) => {
                 const userDoc = await t.get(userRef);
                 if (!userDoc.exists) {
-                    throw "User not found!";
+                    throw new Error(`User with ID ${userId} not found!`);
                 }
                 const currentBalance = userDoc.data().depositBalance || 0;
                 const newBalance = currentBalance + amountPaid;
+                finalBalance = newBalance; // <<-- BUG FIX: Yahan uski value set ki
                 
                 // User ka balance update karna
                 t.update(userRef, { depositBalance: newBalance });
@@ -118,7 +136,10 @@ app.post('/webhook', async (req, res) => {
                 });
             });
 
-            console.log(`Successfully updated balance for user ${userId}. New balance: ${newBalance}`);
+            // BUG FIX: Ab 'finalBalance' variable yahan aasaani se use ho sakta hai
+            console.log(`Successfully updated balance for user ${userId}. New balance: ${finalBalance}`);
+        } else {
+             console.log(`Webhook received with status: ${webhookData.data.order.order_status}`);
         }
 
         res.status(200).send('Webhook processed');
