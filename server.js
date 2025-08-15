@@ -1,4 +1,4 @@
-// server.js (with Webhook for Balance Update and Debugging)
+// server.js (Final Corrected Version)
 
 const express = require('express');
 const axios = require('axios');
@@ -25,22 +25,6 @@ app.use(express.json({
     }
 }));
 app.use(cors());
-
-
-// =================================================================
-// >> DEBUGGING MIDDLEWARE <<
-// Har request aur uske headers ko log karne ke liye
-// =================================================================
-app.use((req, res, next) => {
-    console.log(`--> Request Received: ${req.method} ${req.originalUrl}`);
-    if (req.originalUrl === '/webhook') {
-        // Sirf webhook ke liye headers ko detail mein log karein
-        console.log('--> Webhook Headers:', JSON.stringify(req.headers, null, 2));
-    }
-    next(); // Request ko aage bhejo
-});
-// =================================================================
-
 
 const PORT = process.env.PORT || 3000;
 
@@ -80,7 +64,7 @@ app.post('/create-order', async (req, res) => {
 
 
 // =================================================================
-// Webhook Endpoint - Cashfree yahan signal bhejega
+// >> FINAL CORRECTED Webhook Endpoint <<
 // =================================================================
 app.post('/webhook', async (req, res) => {
     try {
@@ -88,7 +72,7 @@ app.post('/webhook', async (req, res) => {
         const timestamp = req.headers['x-webhook-timestamp'];
         const payload = req.rawBody;
 
-        // Step 1: Signature verify karna (bahut zaroori)
+        // Step 1: Signature verify karna
         const secret = CLIENT_SECRET;
         const dataToVerify = timestamp + payload;
         const expectedSignature = crypto.createHmac('sha256', secret).update(dataToVerify).digest('base64');
@@ -98,21 +82,23 @@ app.post('/webhook', async (req, res) => {
             return res.status(400).send('Invalid signature');
         }
 
-        // Step 2: Payment successful hai ya nahi, yeh check karna
+        // Step 2: Payment status check karna
         const webhookData = JSON.parse(payload);
-        if (webhookData.data.order.order_status === 'PAID') {
-            console.log('Payment Successful Webhook Received:', webhookData.data.order.order_id);
+        
+        // FIX: '.data' yahan se hata diya gaya hai
+        if (webhookData.order.order_status === 'PAID') {
+            
+            console.log('Payment Successful Webhook Received:', webhookData.order.order_id);
 
-            const order = webhookData.data.order;
+            const order = webhookData.order;
             const userId = order.customer_details.customer_id;
             const amountPaid = order.order_amount;
-            let finalBalance = 0; // <<-- BUG FIX: Variable ko yahan bahar define kiya
+            let finalBalance = 0;
 
             // Step 3: Firestore Database mein balance update karna
             const userRef = db.collection('users').doc(userId);
-            const transactionRef = db.collection('addMoneyRequests').doc(); // Naya document
+            const transactionRef = db.collection('addMoneyRequests').doc();
 
-            // Transaction ka istemal karke atomically update karna
             await db.runTransaction(async (t) => {
                 const userDoc = await t.get(userRef);
                 if (!userDoc.exists) {
@@ -120,9 +106,8 @@ app.post('/webhook', async (req, res) => {
                 }
                 const currentBalance = userDoc.data().depositBalance || 0;
                 const newBalance = currentBalance + amountPaid;
-                finalBalance = newBalance; // <<-- BUG FIX: Yahan uski value set ki
+                finalBalance = newBalance;
                 
-                // User ka balance update karna
                 t.update(userRef, { depositBalance: newBalance });
                 
                 // Transaction record banana
@@ -130,16 +115,15 @@ app.post('/webhook', async (req, res) => {
                     userId: userId,
                     amount: amountPaid,
                     orderId: order.order_id,
-                    transactionId: webhookData.data.payment.cf_payment_id,
+                    transactionId: webhookData.payment.cf_payment_id,
                     status: 'SUCCESS',
                     createdAt: admin.firestore.FieldValue.serverTimestamp()
                 });
             });
 
-            // BUG FIX: Ab 'finalBalance' variable yahan aasaani se use ho sakta hai
             console.log(`Successfully updated balance for user ${userId}. New balance: ${finalBalance}`);
         } else {
-             console.log(`Webhook received with status: ${webhookData.data.order.order_status}`);
+             console.log(`Webhook received with status: ${webhookData.order.order_status}`);
         }
 
         res.status(200).send('Webhook processed');
